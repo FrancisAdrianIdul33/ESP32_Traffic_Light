@@ -8,6 +8,10 @@
 <!-- Firebase COMPAT SDK (v9 compat — no ES module imports needed) -->
 <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-database-compat.js"></script>
+
+<!-- Audio -->
+<audio id="audioHenshin" src="media/Henshin.mp3" loop></audio>
+<audio id="audioOOO"     src="media/OOO.mp3"     loop></audio>
 <style>
   :root {
     --red: #e03030;
@@ -445,6 +449,56 @@
   .mini-bulb.g { background: #001008; }
   .mini-bulb.g.on { background: var(--green-glow); box-shadow: 0 0 10px var(--green-glow); }
 
+  /* Music button */
+  .music-btn {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 14px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-size: 0.78rem;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    background: rgba(255,255,255,0.03);
+    color: var(--text-dim);
+    cursor: pointer;
+    transition: all 0.2s;
+    font-family: 'Rajdhani', sans-serif;
+    font-weight: 700;
+  }
+  .music-btn:hover {
+    border-color: var(--gold);
+    color: var(--gold-light);
+    background: rgba(200,150,12,0.08);
+  }
+  .music-btn.playing {
+    border-color: var(--green);
+    color: var(--green-glow);
+    background: rgba(30,156,74,0.1);
+    box-shadow: 0 0 10px rgba(46,204,113,0.2);
+  }
+  .eq-bars {
+    display: flex; align-items: flex-end; gap: 2px;
+    height: 14px; width: 16px;
+  }
+  .eq-bar {
+    width: 3px; border-radius: 1px;
+    background: var(--text-dim);
+    transition: background 0.2s;
+  }
+  .music-btn.playing .eq-bar { background: var(--green-glow); }
+  .eq-bar:nth-child(1) { height: 40%; animation: none; }
+  .eq-bar:nth-child(2) { height: 70%; animation: none; }
+  .eq-bar:nth-child(3) { height: 55%; animation: none; }
+  .eq-bar:nth-child(4) { height: 90%; animation: none; }
+  .music-btn.playing .eq-bar:nth-child(1) { animation: eq1 0.6s ease-in-out infinite alternate; }
+  .music-btn.playing .eq-bar:nth-child(2) { animation: eq2 0.5s ease-in-out infinite alternate; }
+  .music-btn.playing .eq-bar:nth-child(3) { animation: eq3 0.7s ease-in-out infinite alternate; }
+  .music-btn.playing .eq-bar:nth-child(4) { animation: eq4 0.4s ease-in-out infinite alternate; }
+  @keyframes eq1 { from{height:20%} to{height:80%} }
+  @keyframes eq2 { from{height:60%} to{height:30%} }
+  @keyframes eq3 { from{height:40%} to{height:100%} }
+  @keyframes eq4 { from{height:80%} to{height:20%} }
+
   /* Responsive */
   @media (max-width: 900px) {
     .main { grid-template-columns: 1fr; }
@@ -472,7 +526,7 @@
     </div>
     <div class="title-block">
       <h1>OOO TRAFFIC COMMAND</h1>
-      <p>ESP32 · Firebase RT · Kamen System v1.0</p>
+      <p>ESP32 · Firebase RT · RED-YELLOW-GREEN LED</p>
     </div>
   </div>
   <div class="status-bar">
@@ -480,6 +534,15 @@
       <div class="conn-dot" id="fbDot"></div>
       <span id="fbStatus">CONNECTING</span>
     </div>
+    <button class="music-btn" id="oooMusicBtn" onclick="toggleOOOMusic()">
+      <div class="eq-bars">
+        <div class="eq-bar"></div>
+        <div class="eq-bar"></div>
+        <div class="eq-bar"></div>
+        <div class="eq-bar"></div>
+      </div>
+      <span id="oooMusicLabel">OOO BGM</span>
+    </button>
     <div class="conn-badge" style="border-color: rgba(200,150,12,0.3);">
       <div class="conn-dot" id="espDot"></div>
       <span id="espStatus">ESP32</span>
@@ -615,7 +678,6 @@
 
 <script>
 // ─── Firebase Init (compat SDK — no ES module imports) ──────────
-
 const firebaseConfig = {
   apiKey: "AIzaSyAgbmV5PMjWZ_4Av4tfHVsRN-X7lxRaGy4",
   authDomain: "traffic-light-a4480.firebaseapp.com",
@@ -708,6 +770,7 @@ function setMode(mode) {
   tlRef.update({ mode });
   addLog(`Mode → ${mode.toUpperCase()}`, 'gold');
   applyModeUI(mode);
+  syncHenshinAudio(mode);
 
   if (mode === 'auto') {
     // ESP32 drives auto — just clear local timer if any
@@ -811,6 +874,7 @@ tlRef.on('value', snap => {
   if (data.mode && data.mode !== prevMode) {
     prevMode = data.mode;
     applyModeUI(data.mode);
+    syncHenshinAudio(data.mode);
     addLog(`Mode synced ← ${data.mode.toUpperCase()}`, 'gold');
   }
 
@@ -969,24 +1033,26 @@ function drawScene() {
   ctx.strokeStyle = 'rgba(255,255,255,0.5)'; ctx.lineWidth = 3;
   ctx.beginPath(); ctx.moveTo(stopX, roadTop); ctx.lineTo(stopX, roadTop + roadH); ctx.stroke();
 
-  // Cars
-  const STOP_X = stopX - 60;
+  // Cars — proper gap-based queuing
+  const STOP_X  = stopX - CAR_W / 2 - 8; // where car front stops at red
+  const CAR_GAP = CAR_W + 12;             // bumper-to-bumper minimum gap
+
+  // Process each lane independently, front cars first so followers react
+  [0, 1, 2].forEach(lane => {
+    const lc = cars.filter(c => c.lane === lane).sort((a, b) => b.x - a.x);
+    lc.forEach((car, i) => {
+      const leader = i === 0 ? null : lc[i - 1];
+      const stopLineLimit = currentLight !== 'green' ? STOP_X : Infinity;
+      const carAheadLimit = leader ? leader.x - CAR_GAP : Infinity;
+      const limit = Math.min(stopLineLimit, carAheadLimit);
+      if (car.x < limit) car.x = Math.min(car.x + car.speed, limit);
+    });
+  });
+
+  // Draw all cars
   for (let idx = cars.length - 1; idx >= 0; idx--) {
     const car = cars[idx];
     const y = getLaneY(car.lane, H);
-    const ahead = cars.filter(c => c.lane === car.lane && c.x > car.x && c.x - car.x < 70);
-    const blocked = ahead.length > 0;
-    const atStop = car.x >= STOP_X && car.x < stopX && currentLight !== 'green';
-    const shouldStop = atStop || (currentLight !== 'green' && car.x < STOP_X && car.x > STOP_X - 100 && blocked);
-
-    if (!shouldStop && !blocked) {
-      car.x += car.speed;
-    } else if (!shouldStop && blocked) {
-      const nearest = ahead.reduce((a, b) => a.x < b.x ? a : b);
-      if (nearest.x - car.x > 55) car.x += car.speed * 0.5;
-    } else if (car.x < STOP_X) {
-      car.x += car.speed;
-    }
 
     ctx.save();
     ctx.translate(car.x, y);
@@ -1030,6 +1096,37 @@ function shadeColor(hex, amt) {
 setInterval(() => { if (cars.length < 12) spawnCar(); }, 1800);
 function loop() { drawScene(); requestAnimationFrame(loop); }
 loop();
+
+// ─── Audio ───────────────────────────────────────────────────────
+const audioHenshin = document.getElementById('audioHenshin');
+const audioOOO     = document.getElementById('audioOOO');
+let oooPlaying = false;
+
+// Henshin BGM: plays when AUTO mode is active, pauses on MANUAL
+function syncHenshinAudio(mode) {
+  if (mode === 'auto') {
+    audioHenshin.play().catch(() => {}); // catch autoplay policy
+  } else {
+    audioHenshin.pause();
+  }
+}
+
+// OOO BGM toggle button
+function toggleOOOMusic() {
+  const btn   = document.getElementById('oooMusicBtn');
+  const label = document.getElementById('oooMusicLabel');
+  if (oooPlaying) {
+    audioOOO.pause();
+    oooPlaying = false;
+    btn.classList.remove('playing');
+    label.textContent = 'OOO BGM';
+  } else {
+    audioOOO.play().catch(() => {});
+    oooPlaying = true;
+    btn.classList.add('playing');
+    label.textContent = 'PLAYING';
+  }
+}
 
 // ─── Init ─────────────────────────────────────────────────────────
 addLog('OOO Traffic System initialized', 'gold');
