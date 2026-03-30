@@ -1034,15 +1034,18 @@ function drawScene() {
   ctx.beginPath(); ctx.moveTo(stopX, roadTop); ctx.lineTo(stopX, roadTop + roadH); ctx.stroke();
 
   // Cars — proper gap-based queuing
-  const STOP_X  = stopX - CAR_W / 2 - 8; // where car front stops at red
+ const STOP_X  = stopX - CAR_W / 2 - 4; // car center stops so front edge meets the line
   const CAR_GAP = CAR_W + 12;             // bumper-to-bumper minimum gap
 
   // Process each lane independently, front cars first so followers react
   [0, 1, 2].forEach(lane => {
     const lc = cars.filter(c => c.lane === lane).sort((a, b) => b.x - a.x);
-    lc.forEach((car, i) => {
+   lc.forEach((car, i) => {
       const leader = i === 0 ? null : lc[i - 1];
-      const stopLineLimit = currentLight !== 'green' ? STOP_X : Infinity;
+     // A car has "crossed" if its front (car.x + CAR_W/2) is past the stop line
+      const hasCrossed = (car.x + CAR_W / 2) > stopX;
+      const stopLineLimit = (currentLight !== 'green' && !hasCrossed) ? STOP_X : Infinity;
+
       const carAheadLimit = leader ? leader.x - CAR_GAP : Infinity;
       const limit = Math.min(stopLineLimit, carAheadLimit);
       if (car.x < limit) car.x = Math.min(car.x + car.speed, limit);
