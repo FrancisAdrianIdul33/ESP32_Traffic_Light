@@ -340,7 +340,7 @@
   .duration-inputs {
     padding: 0 16px 14px;
     display: grid;
-    grid-template-columns: 1fr 1fr 1fr;
+    grid-template-columns: 1fr 1fr;
     gap: 8px;
   }
   .dur-group label {
@@ -360,6 +360,22 @@
     transition: border-color 0.2s;
   }
   .dur-group input:focus { outline: none; border-color: var(--gold); }
+
+  /* sequence hint */
+  .seq-hint {
+    padding: 0 16px 14px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.65rem;
+    letter-spacing: 1.5px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+  }
+  .seq-pip {
+    width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0;
+  }
+  .seq-arrow { color: #444; font-size: 0.7rem; }
 
   /* ── ROAD SCREEN ── */
   .road-panel { display: flex; flex-direction: column; }
@@ -602,19 +618,31 @@
     <div style="padding: 10px 16px 4px; font-family:'Orbitron',monospace; font-size:0.62rem; letter-spacing:2px; color:var(--text-dim); text-transform:uppercase;">
       Auto Durations (sec)
     </div>
+    <!-- Only Red & Green are configurable; Yellow is always 5s in auto -->
     <div class="duration-inputs">
       <div class="dur-group">
         <label style="color:var(--red-glow)">Red</label>
         <input type="number" id="durRed" value="30" min="1" max="999" onchange="updateDurations()">
       </div>
       <div class="dur-group">
-        <label style="color:var(--yellow-glow)">Yellow</label>
-        <input type="number" id="durYellow" value="5" min="1" max="999" onchange="updateDurations()">
-      </div>
-      <div class="dur-group">
         <label style="color:var(--green-glow)">Green</label>
         <input type="number" id="durGreen" value="25" min="1" max="999" onchange="updateDurations()">
       </div>
+    </div>
+
+    <!-- Sequence hint -->
+    <div class="seq-hint">
+      <div class="seq-pip" style="background:var(--green-glow);box-shadow:0 0 6px var(--green-glow)"></div>
+      <span>Green</span>
+      <span class="seq-arrow">→</span>
+      <div class="seq-pip" style="background:var(--yellow-glow);box-shadow:0 0 6px var(--yellow-glow)"></div>
+      <span>5s</span>
+      <span class="seq-arrow">→</span>
+      <div class="seq-pip" style="background:var(--red-glow);box-shadow:0 0 6px var(--red-glow)"></div>
+      <span>Red</span>
+      <span class="seq-arrow">→</span>
+      <div class="seq-pip" style="background:var(--green-glow);box-shadow:0 0 6px var(--green-glow)"></div>
+      <span style="font-size:0.55rem;color:#555">(no yellow)</span>
     </div>
   </div>
 
@@ -677,7 +705,7 @@
 </div>
 
 <script>
-// ─── Firebase Init (compat SDK — no ES module imports) ──────────
+// ─── Firebase Init ───────────────────────────────────────────────
 const firebaseConfig = {
   apiKey: "AIzaSyAgbmV5PMjWZ_4Av4tfHVsRN-X7lxRaGy4",
   authDomain: "traffic-light-a4480.firebaseapp.com",
@@ -702,28 +730,107 @@ db.ref('.info/connected').on('value', snap => {
 });
 
 // ─── Local state ─────────────────────────────────────────────────
-let currentLight  = 'red';
-let currentMode   = 'auto';
-let autoTimer     = null;
-let autoPhase     = 0;       // 0=red 1=yellow 2=green
-let autoPhaseTime = 0;
-let autoMaxTime   = 30;
-let cycles        = 0;
-let carsPassed    = 0;
-let lastEspSignal = '';      // track last signal we received from ESP32 to avoid echo
+let currentLight = 'red';
+let currentMode  = 'manual';
+let cycles       = 0;
+let carsPassed   = 0;
 
-const phases = ['red', 'yellow', 'green'];
+// ─────────────────────────────────────────────────────────────────
+// AUTO-CYCLE LOGIC
+//
+// Sequence:
+//   GREEN (configurable) → YELLOW (fixed 5 s) → RED (configurable)
+//                                               → GREEN (skip yellow)
+//
+// i.e. the repeating order is:  green → yellow → red → green → yellow → red …
+//
+// After RED the next signal is GREEN — yellow is only used as the
+// transition OUT of green, never as a transition out of red.
+// ─────────────────────────────────────────────────────────────────
+const YELLOW_FIXED_S = 5;          // yellow always lasts exactly 5 s
+
+//  0 = green  |  1 = yellow  |  2 = red
+const AUTO_SEQ = ['green', 'yellow', 'red'];
+let autoSeqIdx  = 0;               // which phase we're currently on
+let autoTimeout = null;            // setTimeout handle for next phase
+let countdownInterval = null;      // setInterval handle for display countdown
+let countdownLeft = 0;
+let countdownMax  = 0;
 
 function getDur(phase) {
-  const ids = { red: 'durRed', yellow: 'durYellow', green: 'durGreen' };
-  return parseInt(document.getElementById(ids[phase]).value) || 10;
+  if (phase === 'yellow') return YELLOW_FIXED_S;
+  if (phase === 'red')    return parseInt(document.getElementById('durRed').value)   || 30;
+  if (phase === 'green')  return parseInt(document.getElementById('durGreen').value) || 25;
+  return 10;
+}
+
+// Commit a signal change to Firebase and update visuals
+function pushSignal(color) {
+  tlRef.update({ signal: color, timestamp: Date.now() });
+  updateVisuals(color);
+  addLog(`Signal → ${color.toUpperCase()} (auto)`, color);
+}
+
+// Run the current phase then schedule the next one
+function runAutoPhase() {
+  const phase    = AUTO_SEQ[autoSeqIdx];
+  const duration = getDur(phase);
+
+  pushSignal(phase);
+  startCountdown(duration);
+
+  autoTimeout = setTimeout(() => {
+    // Advance to next phase in the sequence
+    autoSeqIdx = (autoSeqIdx + 1) % AUTO_SEQ.length;
+
+    // Count a full cycle every time we loop back to green
+    if (AUTO_SEQ[autoSeqIdx] === 'green') {
+      cycles++;
+      document.getElementById('cycleCount').textContent = cycles;
+    }
+
+    runAutoPhase();
+  }, duration * 1000);
+}
+
+function startAutoCycle() {
+  stopAutoCycle();
+  // Always begin a fresh cycle at GREEN so the sequence is predictable
+  autoSeqIdx = 0;
+  runAutoPhase();
+}
+
+function stopAutoCycle() {
+  if (autoTimeout)         { clearTimeout(autoTimeout);          autoTimeout = null; }
+  if (countdownInterval)   { clearInterval(countdownInterval);   countdownInterval = null; }
+  document.getElementById('timerDisplay').textContent = '--';
+  document.getElementById('timerBar').style.width = '100%';
+}
+
+// ─── Countdown display ───────────────────────────────────────────
+function startCountdown(seconds) {
+  if (countdownInterval) clearInterval(countdownInterval);
+  countdownMax  = seconds;
+  countdownLeft = seconds;
+  updateCountdownDisplay();
+
+  countdownInterval = setInterval(() => {
+    countdownLeft = Math.max(0, countdownLeft - 1);
+    updateCountdownDisplay();
+  }, 1000);
+}
+
+function updateCountdownDisplay() {
+  document.getElementById('timerDisplay').textContent = countdownLeft + 's';
+  const pct = countdownMax > 0 ? (countdownLeft / countdownMax) * 100 : 100;
+  document.getElementById('timerBar').style.width = pct + '%';
 }
 
 // ─── Visual update (no Firebase write) ──────────────────────────
 function updateVisuals(color) {
-  document.getElementById('tlRed').classList.toggle('active', color === 'red');
+  document.getElementById('tlRed').classList.toggle('active',    color === 'red');
   document.getElementById('tlYellow').classList.toggle('active', color === 'yellow');
-  document.getElementById('tlGreen').classList.toggle('active', color === 'green');
+  document.getElementById('tlGreen').classList.toggle('active',  color === 'green');
 
   document.getElementById('miniR').classList.toggle('on', color === 'red');
   document.getElementById('miniY').classList.toggle('on', color === 'yellow');
@@ -733,21 +840,17 @@ function updateVisuals(color) {
   el.textContent = color.toUpperCase();
   el.className = 'stat-val ' + { red: 'red-t', yellow: 'yel-t', green: 'grn-t' }[color];
 
-  const glowMap = {
-    red:    'var(--red-glow)',
-    yellow: 'var(--yellow-glow)',
-    green:  'var(--green-glow)'
-  };
+  const glowMap = { red: 'var(--red-glow)', yellow: 'var(--yellow-glow)', green: 'var(--green-glow)' };
   const c = glowMap[color];
   document.documentElement.style.setProperty('--active-color', c);
 
-  document.getElementById('roadBadge').style.background  = c;
-  document.getElementById('roadBadge').style.boxShadow   = `0 0 6px ${c}`;
+  document.getElementById('roadBadge').style.background = c;
+  document.getElementById('roadBadge').style.boxShadow  = `0 0 6px ${c}`;
   const msgs = { red: 'RED · ALL STOP', yellow: 'YELLOW · CAUTION', green: 'GREEN · FLOW ACTIVE' };
   document.getElementById('roadStatus').textContent = msgs[color];
 
-  document.getElementById('timerBar').style.background  = c;
-  document.getElementById('timerBar').style.boxShadow   = `0 0 8px ${c}`;
+  document.getElementById('timerBar').style.background = c;
+  document.getElementById('timerBar').style.boxShadow  = `0 0 8px ${c}`;
 
   // Highlight active signal button
   document.querySelectorAll('.ctrl-btn').forEach(b => b.classList.remove('sel'));
@@ -761,8 +864,8 @@ function updateVisuals(color) {
 function setManualLight(color) {
   if (currentMode !== 'manual') return;
   tlRef.update({ signal: color, timestamp: Date.now() });
+  updateVisuals(color);
   addLog(`Dashboard → ${color.toUpperCase()} (manual)`, color);
-  // Visual will update via the Firebase listener below
 }
 
 // ─── Mode switch ─────────────────────────────────────────────────
@@ -773,137 +876,85 @@ function setMode(mode) {
   syncHenshinAudio(mode);
 
   if (mode === 'auto') {
-    // ESP32 drives auto — just clear local timer if any
-    if (autoTimer) clearInterval(autoTimer);
-    autoTimer = null;
-    document.getElementById('timerDisplay').textContent = '--';
-    document.getElementById('timerBar').style.width = '100%';
+    startAutoCycle();
   } else {
-    if (autoTimer) clearInterval(autoTimer);
-    autoTimer = null;
-    document.getElementById('timerDisplay').textContent = '--';
-    document.getElementById('timerBar').style.width = '100%';
+    stopAutoCycle();
   }
 }
 
 function applyModeUI(mode) {
   currentMode = mode;
   document.getElementById('manualBtn').classList.toggle('active', mode === 'manual');
-  document.getElementById('autoBtn').classList.toggle('active', mode === 'auto');
+  document.getElementById('autoBtn').classList.toggle('active',   mode === 'auto');
   document.getElementById('activeMode').textContent = mode.toUpperCase();
 
   // Enable/disable manual buttons
   const disabled = mode !== 'manual';
   document.querySelectorAll('.ctrl-btn, .tl-light').forEach(b => {
-    b.style.opacity = disabled ? '0.45' : '1';
-    b.style.pointerEvents = disabled ? 'none' : 'auto';
+    b.style.opacity       = disabled ? '0.45' : '1';
+    b.style.pointerEvents = disabled ? 'none'  : 'auto';
   });
 }
 
 // ─── Send duration changes to Firebase ──────────────────────────
 function updateDurations() {
   tlRef.update({
-    durRed:    parseInt(document.getElementById('durRed').value)    || 30,
-    durYellow: parseInt(document.getElementById('durYellow').value) || 5,
-    durGreen:  parseInt(document.getElementById('durGreen').value)  || 25,
+    durRed:    parseInt(document.getElementById('durRed').value)   || 30,
+    durYellow: YELLOW_FIXED_S,                                          // always 5
+    durGreen:  parseInt(document.getElementById('durGreen').value) || 25,
   });
   addLog('Durations updated → Firebase', 'gold');
 }
 
-// ─── Auto-cycle phase timer (display only, driven by Firebase) ──
-// We mirror the ESP32 auto-cycle locally just to show the countdown.
-// The ESP32 is the actual authority; we reset whenever signal changes.
-let displayTimer = null;
-let displayPhaseMax = 30;
-let displayPhaseLeft = 30;
-
-function startDisplayTimer(signal, durMap) {
-  if (displayTimer) clearInterval(displayTimer);
-  displayPhaseMax  = durMap[signal] || 10;
-  displayPhaseLeft = displayPhaseMax;
-  updateTimerDisplay();
-
-  displayTimer = setInterval(() => {
-    displayPhaseLeft = Math.max(0, displayPhaseLeft - 1);
-    updateTimerDisplay();
-  }, 1000);
-}
-
-function updateTimerDisplay() {
-  document.getElementById('timerDisplay').textContent = displayPhaseLeft + 's';
-  const pct = (displayPhaseLeft / displayPhaseMax) * 100;
-  document.getElementById('timerBar').style.width = pct + '%';
-}
-
-// ─── Firebase realtime listener — source of truth ───────────────
-let prevSignal = '';
-let prevMode   = '';
+// ─── Firebase realtime listener — sync ESP32 metadata ───────────
+let prevMode = '';
 
 tlRef.on('value', snap => {
   const data = snap.val();
   if (!data) return;
 
   // ESP32 online status
-  if (data.esp32Online) {
-    document.getElementById('espDot').className  = 'conn-dot online';
-    document.getElementById('espStatus').textContent = 'ESP32 OK';
-  } else {
-    document.getElementById('espDot').className  = 'conn-dot offline';
-    document.getElementById('espStatus').textContent = 'ESP32 OFF';
+  if (data.esp32Online !== undefined) {
+    document.getElementById('espDot').className =
+      data.esp32Online ? 'conn-dot online' : 'conn-dot offline';
+    document.getElementById('espStatus').textContent =
+      data.esp32Online ? 'ESP32 OK' : 'ESP32 OFF';
   }
 
   // ESP32 IP
-  if (data.ip) {
-    document.getElementById('espIP').textContent = data.ip;
-  }
+  if (data.ip) document.getElementById('espIP').textContent = data.ip;
 
   // Uptime (seconds from ESP32)
   if (data.uptime !== undefined) {
-    const s = data.uptime;
-    const m = Math.floor(s / 60).toString().padStart(2, '0');
+    const s   = data.uptime;
+    const m   = Math.floor(s / 60).toString().padStart(2, '0');
     const sec = (s % 60).toString().padStart(2, '0');
     document.getElementById('uptimeVal').textContent = `${m}:${sec}`;
   }
 
-  // Sync duration inputs from Firebase (ESP32 or another client may have changed them)
-  if (data.durRed    !== undefined) document.getElementById('durRed').value    = data.durRed;
-  if (data.durYellow !== undefined) document.getElementById('durYellow').value = data.durYellow;
-  if (data.durGreen  !== undefined) document.getElementById('durGreen').value  = data.durGreen;
+  // Sync duration inputs (Red & Green only; Yellow is locked to 5 s)
+  if (data.durRed   !== undefined) document.getElementById('durRed').value   = data.durRed;
+  if (data.durGreen !== undefined) document.getElementById('durGreen').value  = data.durGreen;
 
-  // Mode sync
+  // Mode sync from another client / ESP32
   if (data.mode && data.mode !== prevMode) {
     prevMode = data.mode;
     applyModeUI(data.mode);
     syncHenshinAudio(data.mode);
     addLog(`Mode synced ← ${data.mode.toUpperCase()}`, 'gold');
+
+    if (data.mode === 'auto' && currentMode !== 'auto') {
+      startAutoCycle();
+    } else if (data.mode !== 'auto') {
+      stopAutoCycle();
+    }
   }
 
-  // Signal sync — always follow Firebase regardless of mode
-  // (ESP32 updates this in both auto and manual)
-  if (data.signal && data.signal !== prevSignal) {
-    const wasAuto = (data.mode || currentMode) === 'auto';
-    if (wasAuto && prevSignal !== '') {
-      // Count a full cycle when we loop back to red
-      if (data.signal === 'red') {
-        cycles++;
-        document.getElementById('cycleCount').textContent = cycles;
-      }
-      // Restart display countdown
-      startDisplayTimer(data.signal, {
-        red:    data.durRed    || getDur('red'),
-        yellow: data.durYellow || getDur('yellow'),
-        green:  data.durGreen  || getDur('green'),
-      });
-    } else if (!wasAuto) {
-      // Manual: stop display timer
-      if (displayTimer) { clearInterval(displayTimer); displayTimer = null; }
-      document.getElementById('timerDisplay').textContent = '--';
-      document.getElementById('timerBar').style.width = '100%';
-    }
-
+  // In MANUAL mode only: mirror the signal from ESP32 / another client
+  // (In AUTO mode the dashboard is the authority — we don't mirror back)
+  if (currentMode === 'manual' && data.signal && data.signal !== currentLight) {
     updateVisuals(data.signal);
     addLog(`Signal ← ${data.signal.toUpperCase()} (ESP32)`, data.signal);
-    prevSignal = data.signal;
   }
 });
 
@@ -913,7 +964,7 @@ function addLog(msg, color) {
   const now  = new Date();
   const time = now.toTimeString().slice(0, 8);
   const colors = { red: '#e03030', yellow: '#d4a017', green: '#1e9c4a', gold: '#c8960c' };
-  const dot = colors[color] || '#445566';
+  const dot  = colors[color] || '#445566';
   const entry = document.createElement('div');
   entry.className = 'log-entry';
   entry.innerHTML = `<span class="log-time">${time}</span><div class="log-dot" style="background:${dot};box-shadow:0 0 5px ${dot}"></div><span class="log-msg">${msg}</span>`;
@@ -993,8 +1044,8 @@ function drawScene() {
 
   // Road edges
   ctx.strokeStyle = '#c8960c'; ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.moveTo(0, roadTop);        ctx.lineTo(W, roadTop);        ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(0, roadTop + roadH); ctx.lineTo(W, roadTop + roadH); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0, roadTop);          ctx.lineTo(W, roadTop);          ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0, roadTop + roadH);  ctx.lineTo(W, roadTop + roadH);  ctx.stroke();
 
   // Lane dividers
   const laneH = roadH / 3;
@@ -1008,7 +1059,7 @@ function drawScene() {
   // Traffic light pole
   const tlX = W * 0.7, tlY = roadTop - 10;
   ctx.strokeStyle = '#aaa'; ctx.lineWidth = 3;
-  ctx.beginPath(); ctx.moveTo(tlX, tlY); ctx.lineTo(tlX, tlY - 90); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(tlX, tlY);      ctx.lineTo(tlX, tlY - 90);      ctx.stroke();
   ctx.beginPath(); ctx.moveTo(tlX, tlY - 90); ctx.lineTo(tlX + 30, tlY - 90); ctx.stroke();
 
   ctx.fillStyle = '#1a1e28'; ctx.strokeStyle = '#555'; ctx.lineWidth = 1.5;
@@ -1033,21 +1084,19 @@ function drawScene() {
   ctx.strokeStyle = 'rgba(255,255,255,0.5)'; ctx.lineWidth = 3;
   ctx.beginPath(); ctx.moveTo(stopX, roadTop); ctx.lineTo(stopX, roadTop + roadH); ctx.stroke();
 
-  // Cars — proper gap-based queuing
- const STOP_X  = stopX - CAR_W / 2 - 4; // car center stops so front edge meets the line
-  const CAR_GAP = CAR_W + 12;             // bumper-to-bumper minimum gap
+  // ── Cars — gap-based queuing ──────────────────────────────────
+  const STOP_X  = stopX - CAR_W / 2 - 4;
+  const CAR_GAP = CAR_W + 12;
 
-  // Process each lane independently, front cars first so followers react
   [0, 1, 2].forEach(lane => {
     const lc = cars.filter(c => c.lane === lane).sort((a, b) => b.x - a.x);
-   lc.forEach((car, i) => {
-      const leader = i === 0 ? null : lc[i - 1];
-     // A car has "crossed" if its front (car.x + CAR_W/2) is past the stop line
-      const hasCrossed = (car.x + CAR_W / 2) > stopX;
+    lc.forEach((car, i) => {
+      const leader      = i === 0 ? null : lc[i - 1];
+      const hasCrossed  = (car.x + CAR_W / 2) > stopX;
+      // Cars stop at the line for RED or YELLOW; GREEN lets them pass
       const stopLineLimit = (currentLight !== 'green' && !hasCrossed) ? STOP_X : Infinity;
-
       const carAheadLimit = leader ? leader.x - CAR_GAP : Infinity;
-      const limit = Math.min(stopLineLimit, carAheadLimit);
+      const limit         = Math.min(stopLineLimit, carAheadLimit);
       if (car.x < limit) car.x = Math.min(car.x + car.speed, limit);
     });
   });
@@ -1055,7 +1104,7 @@ function drawScene() {
   // Draw all cars
   for (let idx = cars.length - 1; idx >= 0; idx--) {
     const car = cars[idx];
-    const y = getLaneY(car.lane, H);
+    const y   = getLaneY(car.lane, H);
 
     ctx.save();
     ctx.translate(car.x, y);
@@ -1105,16 +1154,11 @@ const audioHenshin = document.getElementById('audioHenshin');
 const audioOOO     = document.getElementById('audioOOO');
 let oooPlaying = false;
 
-// Henshin BGM: plays when AUTO mode is active, pauses on MANUAL
 function syncHenshinAudio(mode) {
-  if (mode === 'auto') {
-    audioHenshin.play().catch(() => {}); // catch autoplay policy
-  } else {
-    audioHenshin.pause();
-  }
+  if (mode === 'auto') audioHenshin.play().catch(() => {});
+  else                 audioHenshin.pause();
 }
 
-// OOO BGM toggle button
 function toggleOOOMusic() {
   const btn   = document.getElementById('oooMusicBtn');
   const label = document.getElementById('oooMusicLabel');
@@ -1133,9 +1177,9 @@ function toggleOOOMusic() {
 
 // ─── Init ─────────────────────────────────────────────────────────
 addLog('OOO Traffic System initialized', 'gold');
+addLog('Sequence: GREEN → YELLOW(5s) → RED → GREEN', 'gold');
 addLog('Awaiting Firebase connection…', 'gold');
 
-// Spawn initial cars
 for (let i = 0; i < 4; i++) setTimeout(spawnCar, i * 600);
 </script>
 </body>
