@@ -1,11 +1,19 @@
 // ================================================================
 // ESP32 Traffic Light → Firebase Realtime Database
 //
+// UPDATED: Dashboard now owns the auto-cycle. ESP32 is a pure
+// signal follower — it reads /trafficLight/signal and lights the
+// correct LED regardless of mode. No internal timer loop.
+//
+// Sequence (driven by dashboard):
+//   GREEN (configurable) → YELLOW (5 s fixed) → RED (configurable)
+//   → GREEN  (yellow is skipped after red)
+//
 // Required Library (install via Arduino Library Manager):
 //   Firebase ESP32 Client  →  by Mobizt
 // ================================================================
 #include <WiFi.h>
-#include <FirebaseESP32.h>        // Firebase ESP32 Client by Mobizt
+#include <FirebaseESP32.h>
 
 // ----------------------------------------------------------------
 // Pin Definitions
@@ -23,8 +31,9 @@
 #define FIREBASE_HOST "traffic-light-a4480-default-rtdb.firebaseio.com"
 #define FIREBASE_AUTH "AIzaSyAgbmV5PMjWZ_4Av4tfHVsRN-X7lxRaGy4"
 
-// How often to poll Firebase for commands (ms)
-#define POLL_INTERVAL 2000
+// Poll Firebase this often (ms).
+// Kept short so LEDs react quickly to dashboard changes.
+#define POLL_INTERVAL 500
 
 // ----------------------------------------------------------------
 FirebaseData   fbData;
@@ -32,36 +41,24 @@ FirebaseAuth   fbAuth;
 FirebaseConfig fbConfig;
 
 // ----------------------------------------------------------------
-// Traffic light state
+// State
 // ----------------------------------------------------------------
-String        currentSignal = "red";
-String        currentMode   = "auto";
-int           durRed        = 30;
-int           durYellow     = 5;
-int           durGreen      = 25;
-int           autoPhase     = 0;   // 0=red 1=yellow 2=green
-unsigned long phaseStart    = 0;
-unsigned long lastPoll      = 0;
-
-String phaseNames[] = {"red", "yellow", "green"};
+String currentSignal = "";   // last applied signal — "" forces first apply
+String currentMode   = "";   // "auto" | "manual"
 
 // ----------------------------------------------------------------
-// Set LEDs
+// Apply signal to LEDs — only writes pins when signal actually
+// changes so we don't spam digitalWrite on every poll tick.
 // ----------------------------------------------------------------
-void applySignal(String signal) {
+void applySignal(const String& signal) {
+  if (signal == currentSignal) return;   // nothing changed
+  currentSignal = signal;
+
   digitalWrite(PIN_RED,    signal == "red"    ? HIGH : LOW);
   digitalWrite(PIN_YELLOW, signal == "yellow" ? HIGH : LOW);
   digitalWrite(PIN_GREEN,  signal == "green"  ? HIGH : LOW);
-  Serial.println("Signal → " + signal);
-}
 
-// ----------------------------------------------------------------
-// Auto cycle duration helper
-// ----------------------------------------------------------------
-int phaseDuration(int phase) {
-  if (phase == 0) return durRed;
-  if (phase == 1) return durYellow;
-  return durGreen;
+  Serial.println("[LED] Signal applied → " + signal);
 }
 
 // ================================================================
@@ -72,12 +69,13 @@ void setup() {
   pinMode(PIN_YELLOW, OUTPUT);
   pinMode(PIN_GREEN,  OUTPUT);
 
-  // Boot blink test
+  // Boot blink test — verifies all three LEDs are wired correctly
+  Serial.println("Boot LED test...");
   digitalWrite(PIN_RED,    HIGH); delay(300); digitalWrite(PIN_RED,    LOW);
   digitalWrite(PIN_YELLOW, HIGH); delay(300); digitalWrite(PIN_YELLOW, LOW);
   digitalWrite(PIN_GREEN,  HIGH); delay(300); digitalWrite(PIN_GREEN,  LOW);
 
-  // --- Connect to WiFi ---
+  // ── Connect WiFi ─────────────────────────────────────────────
   Serial.print("Connecting to WiFi");
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   while (WiFi.status() != WL_CONNECTED) {
@@ -86,85 +84,71 @@ void setup() {
   }
   Serial.println("\nWiFi connected! IP: " + WiFi.localIP().toString());
 
-  // --- Connect to Firebase ---
+  // ── Connect Firebase ─────────────────────────────────────────
   fbConfig.host = FIREBASE_HOST;
   fbConfig.signer.tokens.legacy_token = FIREBASE_AUTH;
   Firebase.begin(&fbConfig, &fbAuth);
   Firebase.reconnectWiFi(true);
   Serial.println("Firebase connected!");
 
-  // Write initial state
-  Firebase.setString(fbData, "/trafficLight/signal",    currentSignal);
-  Firebase.setString(fbData, "/trafficLight/mode",      currentMode);
-  Firebase.setInt   (fbData, "/trafficLight/durRed",    durRed);
-  Firebase.setInt   (fbData, "/trafficLight/durYellow", durYellow);
-  Firebase.setInt   (fbData, "/trafficLight/durGreen",  durGreen);
+  // ── Announce online ──────────────────────────────────────────
   Firebase.setBool  (fbData, "/trafficLight/esp32Online", true);
+  Firebase.setString(fbData, "/trafficLight/ip",          WiFi.localIP().toString());
+  Firebase.setInt   (fbData, "/trafficLight/uptime",      0);
 
-  applySignal(currentSignal);
-  phaseStart = millis();
-  Serial.println("Traffic Light System Ready!");
+  // NOTE: We do NOT write signal/mode/durations here anymore.
+  // The dashboard is the authority — let it keep whatever values
+  // it already has in Firebase. We just read and follow.
+
+  Serial.println("ESP32 ready — following dashboard signal.");
 }
 
 // ================================================================
 void loop() {
 
-  // ── Poll Firebase every POLL_INTERVAL ────────────────────────
+  // ── Poll Firebase for current signal ─────────────────────────
+  static unsigned long lastPoll = 0;
   if (millis() - lastPoll >= POLL_INTERVAL) {
     lastPoll = millis();
 
-    // Read mode (auto / manual)
+    // Read mode (for logging only — we apply signal in BOTH modes)
     if (Firebase.getString(fbData, "/trafficLight/mode")) {
       currentMode = fbData.stringData();
     }
 
-    // Read manual signal (only applied if mode == manual)
-    if (currentMode == "manual") {
-      if (Firebase.getString(fbData, "/trafficLight/signal")) {
-        String demanded = fbData.stringData();
-        if (demanded != currentSignal) {
-          currentSignal = demanded;
-          applySignal(currentSignal);
-        }
+    // Always read and apply signal regardless of mode.
+    // In AUTO mode  → dashboard writes signal on its timer cycle.
+    // In MANUAL mode → dashboard writes signal on button press.
+    // ESP32 just follows in both cases.
+    if (Firebase.getString(fbData, "/trafficLight/signal")) {
+      String demanded = fbData.stringData();
+      if (demanded.length() > 0) {
+        applySignal(demanded);   // no-op if unchanged
       }
     }
 
-    // Read durations
-    if (Firebase.getInt(fbData, "/trafficLight/durRed"))    durRed    = fbData.intData();
-    if (Firebase.getInt(fbData, "/trafficLight/durYellow")) durYellow = fbData.intData();
-    if (Firebase.getInt(fbData, "/trafficLight/durGreen"))  durGreen  = fbData.intData();
-
-    // Log result
+    // Log poll status
     if (fbData.httpCode() == 200) {
-      Serial.println("✅ Firebase poll OK");
+      Serial.println("Poll OK | mode=" + currentMode + " | signal=" + currentSignal);
     } else {
-      Serial.println("❌ Firebase error: " + fbData.errorReason());
+      Serial.println("Poll ERR: " + fbData.errorReason());
     }
   }
 
-  // ── Auto cycle ───────────────────────────────────────────────
-  if (currentMode == "auto") {
-    if ((millis() - phaseStart) / 1000 >= (unsigned long)phaseDuration(autoPhase)) {
-      autoPhase     = (autoPhase + 1) % 3;
-      phaseStart    = millis();
-      currentSignal = phaseNames[autoPhase];
-      applySignal(currentSignal);
-      Firebase.setString(fbData, "/trafficLight/signal", currentSignal);
-    }
-  }
-
-  // ── Heartbeat every 10s ──────────────────────────────────────
+  // ── Heartbeat every 10 s ─────────────────────────────────────
+  // Writes uptime, online flag, and IP so dashboard can display them.
   static unsigned long lastHeartbeat = 0;
-  if (millis() - lastHeartbeat > 10000) {
+  if (millis() - lastHeartbeat >= 10000) {
     lastHeartbeat = millis();
-    Firebase.setInt (fbData, "/trafficLight/uptime",      (int)(millis() / 1000));
-    Firebase.setBool(fbData, "/trafficLight/esp32Online", true);
-    Firebase.setString(fbData, "/trafficLight/ip",        WiFi.localIP().toString());
+    Firebase.setInt   (fbData, "/trafficLight/uptime",      (int)(millis() / 1000));
+    Firebase.setBool  (fbData, "/trafficLight/esp32Online", true);
+    Firebase.setString(fbData, "/trafficLight/ip",          WiFi.localIP().toString());
+    Serial.println("[HB] uptime=" + String((int)(millis() / 1000)) + "s");
   }
 
   // ── WiFi watchdog ────────────────────────────────────────────
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi lost — reconnecting...");
+    Serial.println("[WiFi] Lost — reconnecting...");
     WiFi.reconnect();
     delay(3000);
   }
