@@ -428,38 +428,78 @@ function spawnPedestrians(){
   const PED_START_OFFSET = 5;
 
   shuffled.forEach((name,i)=>{
-    pedestrians.push({
+   pedestrians.push({
       name,
-      x: startX+i*spacing,              // fixed X inside crossing zone
-   y: roadTop + i * (PED_SIZE + 6),   // start inside road, stagger downward
-      speed:0.7+Math.random()*0.6,
-      done:false,
+      x: startX + i * spacing,
+      y: roadTop + i * (PED_SIZE + 6),
+      speed: 0.8 + Math.random() * 1.2,   // varied speeds, some fast some slow
+      done: false,
+      spawnTime: performance.now(),
+      phase: Math.random() * Math.PI * 2,  // random walk cycle offset
+      driftDir: 0,
+      driftTimer: 0,
     });
   });
 }
 
 function updateAndDrawPedestrians(){
   const H=canvas.height, roadBottom=H*0.80;
-  const PED_GAP=PED_SIZE+6;
+  const roadTop=H*0.35;
+  const roadH=H*0.45;
+  const now=performance.now();
 
-  // Sort front-to-back (largest y = furthest ahead) so leaders are processed first
-  pedestrians.sort((a,b)=>b.y-a.y);
+  // Compute minimum speed needed so everyone finishes in 30s (30000ms)
+  // roadH / 30s / 60fps ≈ pixels per frame needed
+  const MIN_SPEED = roadH / (30 * 60);
 
-  pedestrians.forEach((p,i)=>{
+  pedestrians.forEach(p=>{
     if(p.done) return;
-    const leader=i===0?null:pedestrians[i-1];
-    const aheadLimit=leader?leader.y-PED_GAP:Infinity;
-    p.y=Math.min(p.y+p.speed, aheadLimit);
-    if(p.y>roadBottom+PED_SIZE){ p.done=true; return; }
+
+    // Guarantee finish: boost speed if falling behind
+    const distLeft = roadBottom - p.y;
+    const timeLeft = 30000 - (now - p.spawnTime);
+    if(timeLeft > 0){
+      const needed = distLeft / (timeLeft / (1000/60));
+      if(needed > p.speed) p.speed = needed + 0.1;
+    }
+
+    // Drift: each ped wanders slightly left/right within zebra zone
+    p.driftTimer = (p.driftTimer||0) - 1;
+    if(p.driftTimer <= 0){
+      p.driftDir   = (Math.random()-0.5)*1.2;  // random sideways nudge
+      p.driftTimer = 30 + Math.random()*40;
+    }
+    const zebraX   = canvas.width*0.7 - 10 + 40;
+    const halfZone = ZEBRA_W/2 - PED_SIZE/2 - 2;
+    p.x += p.driftDir;
+    p.x  = Math.max(zebraX-halfZone, Math.min(zebraX+halfZone, p.x));
+
+    // Move forward — no blocking, each ped moves freely (can overtake)
+    p.y += p.speed;
+    if(p.y > roadBottom+PED_SIZE){ p.done=true; return; }
+
+    // Walk bobble animation
+    const bobFreq  = 0.015 * (p.speed / 1.0);   // faster ped = faster bob
+    const bobAmt   = 2.5;
+    const tiltAmt  = 3;
+    const bob      = Math.sin(now * bobFreq + p.phase) * bobAmt;
+    const tilt     = Math.cos(now * bobFreq + p.phase) * tiltAmt * (Math.PI/180);
+    const squeeze  = 1 + Math.sin(now * bobFreq * 2 + p.phase) * 0.04; // slight squash
 
     const img=pedImgs[p.name];
+    ctx.save();
+    ctx.translate(p.x, p.y + bob);
+    ctx.rotate(tilt);
+    ctx.scale(squeeze, 1/squeeze);
     if(img&&img.complete&&img.naturalWidth>0){
-      ctx.drawImage(img, p.x-PED_SIZE/2, p.y-PED_SIZE/2, PED_SIZE, PED_SIZE);
+      ctx.drawImage(img, -PED_SIZE/2, -PED_SIZE/2, PED_SIZE, PED_SIZE);
     } else {
-      ctx.beginPath(); ctx.arc(p.x,p.y,PED_SIZE/2-2,0,Math.PI*2);
+      ctx.beginPath(); ctx.arc(0,0,PED_SIZE/2-2,0,Math.PI*2);
       ctx.fillStyle='rgba(255,255,255,0.5)'; ctx.fill();
     }
+    ctx.restore();
   });
+
   pedestrians=pedestrians.filter(p=>!p.done);
 }
 
@@ -532,6 +572,7 @@ function drawScene(){
   const TL_BULB_R    = 5;     // bulb radius (smaller = tinier lights)
   const TL_BULB_GAP  = 15;    // gap between bulb centers
   // ─────────────────────────────────────────────────────────────
+
 
   const tlX=W*0.7, tlY=roadTop-10;
   ctx.strokeStyle='#aaa'; ctx.lineWidth=3;
