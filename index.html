@@ -508,16 +508,111 @@ function drawScene(){
   const W=canvas.width, H=canvas.height;
   
   if(!W||!H) return;
+  const now = performance.now();
   ctx.clearRect(0,0,W,H);
 
-  // Sky
-  const sky=ctx.createLinearGradient(0,0,0,H*0.35);
-  sky.addColorStop(0,'#060a14'); sky.addColorStop(1,'#0f1820');
-  ctx.fillStyle=sky; ctx.fillRect(0,0,W,H*0.35);
+ // ── Pixel Sunset Sky ─────────────────────────────────────────
+  const skyH = H * 0.35;
+  const sky  = ctx.createLinearGradient(0, 0, 0, skyH);
+  sky.addColorStop(0,   '#ff6600');   // deep orange top
+  sky.addColorStop(0.4, '#ff8c00');   // bright orange
+  sky.addColorStop(0.75,'#ffb700');   // golden amber
+  sky.addColorStop(1,   '#ffe566');   // bright yellow horizon
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, W, skyH);
 
-  // Stars
-  ctx.fillStyle='rgba(255,255,255,0.6)';
-  for(let i=0;i<60;i++){ ctx.beginPath(); ctx.arc(((i*137+7)%W),((i*89+3)%(H*0.32)),0.7,0,Math.PI*2); ctx.fill(); }
+  // Pixel sun
+  const sunX   = W * 0.62;
+  const sunY   = skyH * 0.58;
+  const sunR   = 22;
+  const rayLen = 14;
+  const rayW   = 3;
+  const sunRot = (now * 0.0003) % (Math.PI * 2);
+  const rayCount = 8;
+
+  ctx.fillStyle = 'rgba(255,220,80,0.2)';
+  ctx.beginPath(); ctx.arc(sunX, sunY, sunR+18, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = 'rgba(255,220,80,0.1)';
+  ctx.beginPath(); ctx.arc(sunX, sunY, sunR+28, 0, Math.PI*2); ctx.fill();
+
+  ctx.fillStyle = '#ffe566';
+  for(let r=0; r<rayCount; r++){
+    const angle = sunRot + (r/rayCount)*Math.PI*2;
+    ctx.save(); ctx.translate(sunX,sunY); ctx.rotate(angle);
+    ctx.fillRect(-rayW/2, sunR+5, rayW, rayLen);
+    ctx.restore();
+  }
+  const px=3;
+  ctx.fillStyle='#ffee00';
+  for(let py=-sunR; py<sunR; py+=px){
+    const hw=Math.round(Math.sqrt(Math.max(0,sunR*sunR-(py+px/2)*(py+px/2)))/px)*px;
+    ctx.fillRect(Math.round(sunX-hw), Math.round(sunY+py), hw*2, px);
+  }
+
+  // Scrolling clouds (move left to right, wrap around)
+  const cloudSpeed = 0.012;
+  const cloudDefs = [
+    { bx:0.05, y:skyH*0.18, w:70,  h:14, layers:[{ox:8,ow:50,oh:10},{ox:18,ow:30,oh:8}] },
+    { bx:0.22, y:skyH*0.10, w:55,  h:12, layers:[{ox:6,ow:40,oh:8}] },
+    { bx:0.42, y:skyH*0.28, w:80,  h:14, layers:[{ox:10,ow:55,oh:10},{ox:22,ow:32,oh:8}] },
+    { bx:0.58, y:skyH*0.14, w:60,  h:12, layers:[{ox:8,ow:42,oh:9}] },
+    { bx:0.72, y:skyH*0.22, w:75,  h:14, layers:[{ox:12,ow:50,oh:10},{ox:24,ow:28,oh:8}] },
+    { bx:0.88, y:skyH*0.08, w:50,  h:12, layers:[{ox:6,ow:36,oh:8}] },
+  ];
+  cloudDefs.forEach((c,ci)=>{
+    const offset = (now * cloudSpeed * (0.6+ci*0.15)) % W;
+    const cx = (c.bx * W + offset) % W;
+    const drawCloud = (ox)=>{
+      ctx.fillStyle='rgba(180,80,10,0.3)';
+      ctx.fillRect(Math.round(ox)+3, Math.round(c.y)+5, c.w, c.h);
+      ctx.fillStyle='#e8712a';
+      ctx.fillRect(Math.round(ox), Math.round(c.y), c.w, c.h);
+      ctx.fillStyle='#f5944a';
+      ctx.fillRect(Math.round(ox)+2, Math.round(c.y), c.w-4, Math.round(c.h*0.45));
+      ctx.fillStyle='#ffb870';
+      ctx.fillRect(Math.round(ox)+4, Math.round(c.y), c.w-10, Math.round(c.h*0.22));
+      c.layers.forEach(l=>{
+        ctx.fillStyle='#f5944a';
+        ctx.fillRect(Math.round(ox+l.ox), Math.round(c.y)-l.oh, l.ow, l.oh);
+        ctx.fillStyle='#ffb870';
+        ctx.fillRect(Math.round(ox+l.ox)+2, Math.round(c.y)-l.oh, l.ow-4, Math.round(l.oh*0.4));
+      });
+    };
+    drawCloud(cx);
+    // Wrap second copy for seamless loop
+    if(cx + c.w > W) drawCloud(cx - W);
+  });
+
+  // City building silhouettes (distant, dark, pixel style)
+  const buildingDefs = [
+    // { x: 0..1 of W, w, h, windows: [{rx,ry},...] }
+    {x:0.00,w:38,h:55},{x:0.04,w:28,h:72},{x:0.08,w:22,h:48},
+    {x:0.11,w:32,h:90},{x:0.15,w:20,h:62},{x:0.18,w:36,h:80},
+    {x:0.22,w:24,h:55},{x:0.25,w:18,h:44},{x:0.28,w:30,h:68},
+    {x:0.31,w:26,h:76},{x:0.35,w:22,h:52},{x:0.38,w:40,h:95},
+    {x:0.43,w:18,h:60},{x:0.46,w:28,h:72},{x:0.50,w:34,h:85},
+    {x:0.54,w:20,h:58},{x:0.57,w:30,h:70},{x:0.61,w:24,h:50},
+    {x:0.64,w:36,h:88},{x:0.68,w:22,h:65},{x:0.71,w:28,h:75},
+    {x:0.75,w:18,h:48},{x:0.78,w:32,h:82},{x:0.82,w:26,h:60},
+    {x:0.85,w:38,h:92},{x:0.89,w:20,h:55},{x:0.92,w:28,h:70},
+    {x:0.95,w:24,h:64},{x:0.97,w:30,h:78},
+  ];
+  const buildCol  = '#5a1a00';   // dark reddish-brown silhouette
+  const buildCol2 = '#3d1000';   // darker variant for depth
+  buildingDefs.forEach((b,bi)=>{
+    const bx  = b.x * W;
+    const by  = skyH - b.h;
+    ctx.fillStyle = bi%3===0 ? buildCol2 : buildCol;
+    ctx.fillRect(Math.round(bx), Math.round(by), b.w, b.h);
+    // Pixel windows (tiny bright squares)
+    ctx.fillStyle='rgba(255,200,80,0.55)';
+    for(let wy=by+6; wy<skyH-6; wy+=10){
+      for(let wx=bx+4; wx<bx+b.w-4; wx+=8){
+        if((Math.floor(wy/10)+Math.floor(wx/8)+bi)%3!==0)
+          ctx.fillRect(Math.round(wx), Math.round(wy), 3, 4);
+      }
+    }
+  });
 
   // Ground
   const ground=ctx.createLinearGradient(0,H*0.8,0,H);
