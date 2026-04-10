@@ -414,23 +414,24 @@ PED_NAMES.forEach(n=>{ const img=new Image(); img.src=`media/${n}.png`; pedImgs[
 let pedestrians=[], pedSpawnDone=false;
 
 function spawnPedestrians(){
-  const count=[1,3,6][Math.floor(Math.random()*3)];
+  const count=[3,6,10][Math.floor(Math.random()*3)];
   const shuffled=[...PED_NAMES].sort(()=>Math.random()-0.5).slice(0,count);
   const W=canvas.width, H=canvas.height;
-  const roadTop=H*0.35;
+ const roadTop=H*0.35;   // match the actual road top
   const tlX=W*0.7;
-  const crossX=tlX+20;   // center X of zebra crossing
+  const crossX=tlX+30;    // center on the zebra zone (stopX+40)
 
   // Space pedestrians evenly within usable zebra width
   const usableW=ZEBRA_W-PED_SIZE;
   const spacing=count>1?usableW/(count-1):0;
   const startX =count>1?crossX-usableW/2:crossX;
+  const PED_START_OFFSET = 5;
 
   shuffled.forEach((name,i)=>{
     pedestrians.push({
       name,
       x: startX+i*spacing,              // fixed X inside crossing zone
-      y: roadTop-PED_SIZE-i*(PED_SIZE+8), // staggered start, queue above road
+   y: roadTop + i * (PED_SIZE + 6),   // start inside road, stagger downward
       speed:0.7+Math.random()*0.6,
       done:false,
     });
@@ -465,6 +466,7 @@ function updateAndDrawPedestrians(){
 // ── Draw ──────────────────────────────────────────────────────────
 function drawScene(){
   const W=canvas.width, H=canvas.height;
+  
   if(!W||!H) return;
   ctx.clearRect(0,0,W,H);
 
@@ -488,30 +490,64 @@ function drawScene(){
   road.addColorStop(0,'#1a1e28'); road.addColorStop(0.5,'#141820'); road.addColorStop(1,'#0f1218');
   ctx.fillStyle=road; ctx.fillRect(0,roadTop,W,roadH);
 
-  // Road edges
+ // ── Sidewalk adjustments (tweak these) ───────────────────────
+  const SW_H        = 28;      // sidewalk thickness in pixels
+  const SW_TILE     = 24;      // tile size (smaller = more tiles)
+  const SW_COL1     = '#2a2e38'; // tile color A
+  const SW_COL2     = '#22262e'; // tile color B
+  // ─────────────────────────────────────────────────────────────
+
+  // Top sidewalk (above road)
+  for (let tx = 0; tx < W; tx += SW_TILE) {
+    const row = Math.floor(tx / SW_TILE);
+    ctx.fillStyle = row % 2 === 0 ? SW_COL1 : SW_COL2;
+    ctx.fillRect(tx, roadTop - SW_H, SW_TILE, SW_H);
+  }
+  // Bottom sidewalk (below road)
+  for (let tx = 0; tx < W; tx += SW_TILE) {
+    const row = Math.floor(tx / SW_TILE);
+    ctx.fillStyle = row % 2 === 0 ? SW_COL1 : SW_COL2;
+    ctx.fillRect(tx, roadTop + roadH, SW_TILE, SW_H);
+  }
+
+  // Road edges (curb lines on top of sidewalk)
   ctx.strokeStyle='#c8960c'; ctx.lineWidth=2;
   ctx.beginPath(); ctx.moveTo(0,roadTop);       ctx.lineTo(W,roadTop);       ctx.stroke();
   ctx.beginPath(); ctx.moveTo(0,roadTop+roadH); ctx.lineTo(W,roadTop+roadH); ctx.stroke();
-
+  // Curb inner edge lines
+  ctx.strokeStyle='rgba(255,255,255,0.08)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(0,roadTop-SW_H);       ctx.lineTo(W,roadTop-SW_H);       ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0,roadTop+roadH+SW_H); ctx.lineTo(W,roadTop+roadH+SW_H); ctx.stroke();
   // Lane dividers
   const laneH=roadH/3;
   ctx.strokeStyle='rgba(255,255,200,0.18)'; ctx.lineWidth=1; ctx.setLineDash([24,18]);
   for(let l=1;l<3;l++){ ctx.beginPath(); ctx.moveTo(0,roadTop+laneH*l); ctx.lineTo(W,roadTop+laneH*l); ctx.stroke(); }
   ctx.setLineDash([]);
 
-  // Traffic light pole
+  // ── Traffic light adjustments (tweak these) ──────────────────
+  const TL_POLE_H    = 150;   // pole height (taller = longer pole)
+  const TL_ARM_LEN   = 25;    // horizontal arm length
+  const TL_BOX_W     = 18;    // housing width
+  const TL_BOX_H     = 46;    // housing height
+  const TL_BULB_R    = 5;     // bulb radius (smaller = tinier lights)
+  const TL_BULB_GAP  = 15;    // gap between bulb centers
+  // ─────────────────────────────────────────────────────────────
+
   const tlX=W*0.7, tlY=roadTop-10;
   ctx.strokeStyle='#aaa'; ctx.lineWidth=3;
-  ctx.beginPath(); ctx.moveTo(tlX,tlY);      ctx.lineTo(tlX,tlY-90);      ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(tlX,tlY-90);   ctx.lineTo(tlX+30,tlY-90);   ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(tlX,tlY); ctx.lineTo(tlX,tlY-TL_POLE_H); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(tlX,tlY-TL_POLE_H); ctx.lineTo(tlX+TL_ARM_LEN,tlY-TL_POLE_H); ctx.stroke();
   ctx.fillStyle='#1a1e28'; ctx.strokeStyle='#555'; ctx.lineWidth=1.5;
-  ctx.beginPath(); ctx.roundRect(tlX+16,tlY-110,28,72,4); ctx.fill(); ctx.stroke();
-  [{y:tlY-106,col:currentLight==='red'?'#ff4444':'#1a0404',glow:'#ff4444'},
-   {y:tlY-84, col:currentLight==='yellow'?'#ffc107':'#140e00',glow:'#ffc107'},
-   {y:tlY-62, col:currentLight==='green'?'#2ecc71':'#001008',glow:'#2ecc71'}].forEach(b=>{
-    ctx.beginPath(); ctx.arc(tlX+30,b.y+8,9,0,Math.PI*2);
+  const boxX=tlX+TL_ARM_LEN-TL_BOX_W/2, boxY=tlY-TL_POLE_H-TL_BOX_H;
+  ctx.beginPath(); ctx.roundRect(boxX,boxY,TL_BOX_W,TL_BOX_H,3); ctx.fill(); ctx.stroke();
+  const bulbX=boxX+TL_BOX_W/2;
+  const bulbY1=boxY+TL_BULB_R+4;
+  [{y:bulbY1,               col:currentLight==='red'?'#ff4444':'#1a0404',glow:'#ff4444'},
+   {y:bulbY1+TL_BULB_GAP,   col:currentLight==='yellow'?'#ffc107':'#140e00',glow:'#ffc107'},
+   {y:bulbY1+TL_BULB_GAP*2, col:currentLight==='green'?'#2ecc71':'#001008',glow:'#2ecc71'}].forEach(b=>{
+    ctx.beginPath(); ctx.arc(bulbX,b.y,TL_BULB_R,0,Math.PI*2);
     const lit=!['#1a0404','#140e00','#001008'].includes(b.col);
-    ctx.shadowColor=lit?b.glow:'transparent'; ctx.shadowBlur=lit?18:0;
+    ctx.shadowColor=lit?b.glow:'transparent'; ctx.shadowBlur=lit?12:0;
     ctx.fillStyle=b.col; ctx.fill(); ctx.shadowBlur=0;
   });
 
@@ -527,6 +563,7 @@ const stripeCount = 30;
 const stripeH = roadH / stripeCount;
 const zebraX = stopX + ZEBRA_OFFSET; // adjustable zebra position
 ctx.fillStyle = 'rgba(255,255,255,0.09)';
+
 
 for (let s = 0; s < stripeCount; s += 2) {
   ctx.fillRect(zebraX - ZEBRA_W / 2, roadTop + s * stripeH, ZEBRA_W, stripeH);
